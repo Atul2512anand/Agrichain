@@ -78,6 +78,8 @@ Build a secure, transparent supply chain solution for agriculture using blockcha
 ![Successful Faucet Transaction](./agri2.jpg)
 ![Contract Call Success](./agri3.jpg)
 [Demo Video](./agri4.mp4)
+![success](./agri5.jpg)
+![success](./agri6.jpg)
 
 ---
 
