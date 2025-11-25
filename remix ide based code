@@ -1,0 +1,250 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+contract AgriSupplyChain {
+    // --- Minimal AccessControl Implementation ---
+    struct RoleData {
+        mapping(address => bool) members;
+    }
+    mapping(bytes32 => RoleData) private _roles;
+    mapping(string => bytes32) private _roleNames;
+    bytes32 public constant DEFAULT_ADMIN_ROLE = 0x00;
+    bytes32 public constant FARMER_ROLE = keccak256("FARMER_ROLE");
+    bytes32 public constant DISTRIBUTOR_ROLE = keccak256("DISTRIBUTOR_ROLE");
+    bytes32 public constant RETAILER_ROLE = keccak256("RETAILER_ROLE");
+
+    modifier onlyRole(bytes32 role) {
+        require(hasRole(role, msg.sender), "AccessControl: sender lacks role");
+        _;
+    }
+
+    function hasRole(bytes32 role, address account) public view returns (bool) {
+        return _roles[role].members[account];
+    }
+
+    function hasRole(string memory roleName, address account) public view returns (bool) {
+        bytes32 role = _roleNames[roleName];
+        require(role != 0, "Invalid role name");
+        return hasRole(role, account);
+    }
+
+    function _grantRole(bytes32 role, address account) internal {
+        _roles[role].members[account] = true;
+    }
+
+    function _revokeRole(bytes32 role, address account) internal {
+        _roles[role].members[account] = false;
+    }
+
+    event RoleGranted(bytes32 indexed role, address indexed account);
+
+    // --- Supply Chain Logic ---
+    enum Stage { Harvested, Packaged, Shipped, Received, Sold }
+    mapping(Stage => Stage) private _validTransitions;
+    uint256 private _produceCount;
+    uint256 public constant MAX_HISTORY_ENTRIES = 10;
+
+    struct Produce {
+        string name;
+        string origin;
+        Stage currentStage;
+        address currentOwner;
+        string[] history;
+    }
+
+    mapping(uint256 => Produce) private _produces;
+
+    event ProduceAdded(uint256 indexed id, string name, address farmer);
+    event StageUpdated(uint256 indexed id, Stage newStage, address updater);
+
+    // --- Output Feature Structures ---
+    struct ProduceOutput {
+        uint256 id;
+        string name;
+        string origin;
+        uint8 currentStage;
+        address currentOwner;
+        string[] history;
+        string stageName;
+        string ownerRole;
+    }
+
+    constructor() {
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _grantRole(FARMER_ROLE, msg.sender);
+        _roleNames["FARMER_ROLE"] = FARMER_ROLE;
+        _roleNames["DISTRIBUTOR_ROLE"] = DISTRIBUTOR_ROLE;
+        _roleNames["RETAILER_ROLE"] = RETAILER_ROLE;
+        _validTransitions[Stage.Harvested] = Stage.Packaged;
+        _validTransitions[Stage.Packaged] = Stage.Shipped;
+        _validTransitions[Stage.Shipped] = Stage.Received;
+        _validTransitions[Stage.Received] = Stage.Sold;
+    }
+
+    // --- Core Functions ---
+    function addProduce(string memory _name, string memory _origin)
+        external
+        onlyRole(FARMER_ROLE)
+        returns (uint256)
+    {
+        require(bytes(_name).length > 0, "Name cannot be empty");
+        require(bytes(_origin).length > 0, "Origin cannot be empty");
+        _produceCount++;
+        _produces[_produceCount] = Produce({
+            name: _name,
+            origin: _origin,
+            currentStage: Stage.Harvested,
+            currentOwner: msg.sender,
+            history: new string[](1)
+        });
+        _produces[_produceCount].history[0] = _formatHistoryEntry(Stage.Harvested, msg.sender);
+        emit ProduceAdded(_produceCount, _name, msg.sender);
+        return _produceCount;
+    }
+
+    // Function to advance the first produce owned by the caller
+    function progressStage(string memory _confirm)
+        external
+        returns (bool)
+    {
+        require(keccak256(abi.encodePacked(_confirm)) == keccak256(abi.encodePacked("YES")), "Confirmation must be YES");
+        require(_produceCount > 0, "No produces exist in the system");
+
+        // Find the first produce owned by the caller
+        uint256 produceId = 0;
+        for (uint256 i = 1; i <= _produceCount; i++) {
+            if (_produces[i].currentOwner == msg.sender) {
+                produceId = i;
+                break;
+            }
+        }
+        require(produceId != 0, "No produce owned by caller");
+        Produce storage produce = _produces[produceId];
+        require(produce.currentOwner != address(0), "Produce does not exist");
+
+        // Determine next stage
+        Stage newStage = _validTransitions[produce.currentStage];
+        require(uint8(newStage) > uint8(produce.currentStage), "No further stage available");
+
+        // Update history
+        string memory historyEntry = _formatHistoryEntry(newStage, msg.sender);
+        if (produce.history.length < MAX_HISTORY_ENTRIES) {
+            produce.history.push(historyEntry);
+        } else {
+            produce.history[MAX_HISTORY_ENTRIES - 1] = historyEntry;
+        }
+
+        // Update stage and owner
+        produce.currentStage = newStage;
+        produce.currentOwner = _getOwnerForStage(msg.sender);
+        emit StageUpdated(produceId, newStage, msg.sender);
+        return true;
+    }
+
+    // --- Role Management ---
+    function grantRole(string memory roleName, address account)
+        external
+        onlyRole(DEFAULT_ADMIN_ROLE)
+        returns (bool)
+    {
+        bytes32 role = _roleNames[roleName];
+        require(role != 0, "Invalid role name");
+        require(!hasRole(role, account), "Account already has this role");
+        _grantRole(role, account);
+        emit RoleGranted(role, account);
+        return true;
+    }
+
+    // --- View Functions ---
+    function getProduce(uint256 _id) external view returns (Produce memory) {
+        return _produces[_id];
+    }
+
+    function getProduceCount() external view returns (uint256) {
+        return _produceCount;
+    }
+
+    // --- Output Feature Functions ---
+    function getProduceOutput(uint256 _id) external view returns (ProduceOutput memory) {
+        Produce memory produce = _produces[_id];
+        require(produce.currentOwner != address(0), "Produce does not exist");
+        return ProduceOutput({
+            id: _id,
+            name: produce.name,
+            origin: produce.origin,
+            currentStage: uint8(produce.currentStage),
+            currentOwner: produce.currentOwner,
+            history: produce.history,
+            stageName: _stageToString(produce.currentStage),
+            ownerRole: _getRoleName(produce.currentOwner)
+        });
+    }
+
+    function getAllProducesOutput() external view returns (ProduceOutput[] memory) {
+        uint256 count = _produceCount;
+        ProduceOutput[] memory outputs = new ProduceOutput[](count);
+        uint256 validCount = 0;
+        for (uint256 i = 0; i < count; i++) {
+            uint256 produceId = i + 1;
+            if (_produces[produceId].currentOwner != address(0)) {
+                Produce memory produce = _produces[produceId];
+                outputs[validCount] = ProduceOutput({
+                    id: produceId,
+                    name: produce.name,
+                    origin: produce.origin,
+                    currentStage: uint8(produce.currentStage),
+                    currentOwner: produce.currentOwner,
+                    history: produce.history,
+                    stageName: _stageToString(produce.currentStage),
+                    ownerRole: _getRoleName(produce.currentOwner)
+                });
+                validCount++;
+            }
+        }
+        // Resize array to remove empty entries
+        assembly {
+            mstore(outputs, validCount)
+        }
+        return outputs;
+    }
+
+    function getStageName(uint8 stageIndex) external pure returns (string memory) {
+        require(stageIndex < 5, "Invalid stage index");
+        if (stageIndex == 0) return "Harvested";
+        if (stageIndex == 1) return "Packaged";
+        if (stageIndex == 2) return "Shipped";
+        if (stageIndex == 3) return "Received";
+        if (stageIndex == 4) return "Sold";
+        return "Unknown";
+    }
+
+    // --- Internal Helpers ---
+    function _formatHistoryEntry(Stage _stage, address _updater)
+        private
+        view
+        returns (string memory)
+    {
+        return string(abi.encodePacked(_stageToString(_stage), " by ", _getRoleName(_updater)));
+    }
+
+    function _stageToString(Stage _stage) private pure returns (string memory) {
+        if (_stage == Stage.Harvested) return "Harvested";
+        if (_stage == Stage.Packaged) return "Packaged";
+        if (_stage == Stage.Shipped) return "Shipped";
+        if (_stage == Stage.Received) return "Received";
+        if (_stage == Stage.Sold) return "Sold";
+        return "Unknown";
+    }
+
+    function _getRoleName(address account) private view returns (string memory) {
+        if (hasRole(FARMER_ROLE, account)) return "Farmer";
+        if (hasRole(DISTRIBUTOR_ROLE, account)) return "Distributor";
+        if (hasRole(RETAILER_ROLE, account)) return "Retailer";
+        if (hasRole(DEFAULT_ADMIN_ROLE, account)) return "Admin";
+        return "Unknown";
+    }
+
+    function _getOwnerForStage(address _updater) private pure returns (address) {
+        return _updater;
+    }
+}
